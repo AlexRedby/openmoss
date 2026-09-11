@@ -773,6 +773,9 @@ GenerateResult generate(Model & model,
         llama_decode_embeddings(model.backbone_ctx(),
                                 prefill_embeds.data(),
                                 prompt_len, hidden, /*pos_start=*/0, /*output_last=*/true);
+        // VNTTS modification: libllama may return before device execution ends.
+        // Keep prefill work out of the first autoregressive phase measurement.
+        llama_synchronize(model.backbone_ctx());
     }
     result.prefill_seconds = seconds_t(clock_t_::now() - t0).count();
     std::fprintf(stderr, "[generate] prefill done in %.2fs\n", result.prefill_seconds);
@@ -801,19 +804,28 @@ GenerateResult generate(Model & model,
 
         // The decoder owns head invocation — the two families disagree on
         // whether the audio heads can run before any code is sampled.
+        const auto t_frame = clock_t_::now();
         last_step = decoder->step(text_logits, hidden_vec, req.sampling);
+        // VNTTS modification: decoder/embedding functions return host data;
+        // their graph computation and readback have already synchronized.
+        result.frame_decoder_seconds += seconds_t(clock_t_::now() - t_frame).count();
         if (last_step.stop) {
             std::fprintf(stderr, "[generate] stop at step %d\n", step);
             break;
         }
 
         // Embed the (1, 1+n_vq) row and feed it as the next position.
+        const auto t_embed = clock_t_::now();
         auto next_emb = model.compute_input_embeddings(last_step.ids.data(), 1);
+        result.input_embedding_seconds += seconds_t(clock_t_::now() - t_embed).count();
+        const auto t_backbone = clock_t_::now();
         llama_decode_embeddings(model.backbone_ctx(),
                                 next_emb.data(),
                                 /*n_tokens=*/1, hidden,
                                 /*pos_start=*/pos,
                                 /*output_last=*/true);
+        llama_synchronize(model.backbone_ctx());
+        result.backbone_seconds += seconds_t(clock_t_::now() - t_backbone).count();
         ++pos;
 
         // Poll on generation steps rather than audio frames: the delay family

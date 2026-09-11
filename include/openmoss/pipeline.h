@@ -118,6 +118,12 @@ struct GenerateResult {
     double             prefill_seconds = 0.0;
     double             generate_seconds = 0.0;
     double             decode_seconds   = 0.0;
+    // VNTTS modification: synchronized autoregressive phase wall times only.
+    // Excludes prefill and codec. Frame decoder includes sampling/cache work,
+    // not just Local depth-transformer kernels; totals need not sum to gen.
+    double             backbone_seconds = 0.0;
+    double             frame_decoder_seconds = 0.0;
+    double             input_embedding_seconds = 0.0;
 };
 
 // Optional callback invoked once the codec produces a chunk of waveform; lets

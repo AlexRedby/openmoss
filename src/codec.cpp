@@ -42,6 +42,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "llama.h"
 
 #include <algorithm>
 #include <array>
@@ -1548,7 +1549,26 @@ std::vector<int32_t> CodecGraphs::encode(const float * waveform,
 // ───────────────────────────────────────────────────────────────────────────
 
 Model::Model()  = default;
-Model::~Model() = default;
+Model::~Model() {
+    // VNTTS modification: callers quiesce requests before destroying Model.
+    // Release graph owners
+    // while their Aux backend is still valid, then release libllama in its
+    // required context-before-model order.
+    m_dac.reset();
+    m_dit.reset();
+    m_codec.reset();
+    m_tokenizer.reset();
+    if (m_backbone_ctx) {
+        llama_synchronize(m_backbone_ctx);
+        llama_free(m_backbone_ctx);
+        m_backbone_ctx = nullptr;
+    }
+    if (m_backbone_model) {
+        llama_model_free(m_backbone_model);
+        m_backbone_model = nullptr;
+    }
+    m_aux.reset();
+}
 
 CodecGraphs * Model::codec() {
     if (!m_codec) m_codec = std::make_unique<CodecGraphs>(*this);

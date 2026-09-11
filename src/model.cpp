@@ -459,7 +459,6 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     cp.flash_attn_type = opts.flash_attn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
     self->m_backbone_ctx = llama_init_from_model(self->m_backbone_model, cp);
     if (!self->m_backbone_ctx) {
-        llama_model_free(self->m_backbone_model);
         throw std::runtime_error("Model::load: failed to init backbone context");
     }
 
@@ -570,6 +569,14 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     if (sc_spec.meta_ctx) ggml_free(sc_spec.meta_ctx);
     gguf_free(bb_spec.gctx);
     ggml_free(bb_spec.meta_ctx);
+
+    // VNTTS modification: opt-in CPU-only experiment, after raw GGUF contexts
+    // released, so the GGML pool constructor cannot extend their cleanup path.
+    if (self->m_aux->init_cpu_pool()) {
+        std::fprintf(stderr,
+                     "Model::load: persistent aux CPU pool = %d threads (idle poll=0)\n",
+                     GGML_DEFAULT_N_THREADS);
+    }
 
     // Cache convenient dim shortcuts on Aux.
     // Hidden size must come from the model, not the ModelDims default (4096, sized

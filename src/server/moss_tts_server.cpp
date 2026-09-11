@@ -615,6 +615,8 @@ int main(int argc, char ** argv) {
         else if (k == "--voice-dir")      voice_dir     = next();
         else if (k == "--webui-dir")      webui_dir_arg = next();
         else if (k == "--no-webui")       no_webui     = true;
+        // VNTTS modification: verify the diagnostic build without loading weights.
+        else if (k == "--version") { std::printf("openmoss %s\n", OPENMOSS_VERSION); return 0; }
         else if (k == "--help" || k == "-h") usage(0);
         else { std::fprintf(stderr, "unknown arg: %s\n", k.c_str()); usage(2); }
     }
@@ -1412,6 +1414,10 @@ int main(int argc, char ** argv) {
         rs.set_header("X-MOSS-Audio-Frames", std::to_string(result.n_audio_frames));
         rs.set_header("X-MOSS-Generate-Seconds",
                        std::to_string(result.generate_seconds));
+        // VNTTS modification: optional, synchronized autoregressive phase times.
+        rs.set_header("X-MOSS-Backbone-Seconds", std::to_string(result.backbone_seconds));
+        rs.set_header("X-MOSS-Frame-Decoder-Seconds", std::to_string(result.frame_decoder_seconds));
+        rs.set_header("X-MOSS-Input-Embedding-Seconds", std::to_string(result.input_embedding_seconds));
         rs.set_header("X-MOSS-Decode-Seconds",
                        std::to_string(result.decode_seconds));
         rs.set_header("X-MOSS-Channels", std::to_string(result.n_channels));
@@ -1579,6 +1585,10 @@ int main(int argc, char ** argv) {
         rs.set_header("X-MOSS-Audio-Frames", std::to_string(result.n_audio_frames));
         rs.set_header("X-MOSS-Generate-Seconds",
                        std::to_string(result.generate_seconds));
+        // VNTTS modification: same contract for the OpenAI-compatible endpoint.
+        rs.set_header("X-MOSS-Backbone-Seconds", std::to_string(result.backbone_seconds));
+        rs.set_header("X-MOSS-Frame-Decoder-Seconds", std::to_string(result.frame_decoder_seconds));
+        rs.set_header("X-MOSS-Input-Embedding-Seconds", std::to_string(result.input_embedding_seconds));
         rs.set_header("X-MOSS-Decode-Seconds",
                        std::to_string(result.decode_seconds));
         rs.set_header("X-MOSS-Channels", std::to_string(result.n_channels));

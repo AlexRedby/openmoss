@@ -1,6 +1,13 @@
 # Smoke tests — meant to validate plumbing, not correctness of generation.
 # Build with: cmake --build build --target moss-tts-info
 
+# VNTTS modification: no weights, audio device or GPU needed.
+add_executable(moss-aux-pool-check moss_aux_pool_check.cpp)
+target_include_directories(moss-aux-pool-check PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(moss-aux-pool-check PRIVATE openmoss_core ggml-cpu)
+add_test(NAME moss-aux-pool-check COMMAND moss-aux-pool-check)
+set_tests_properties(moss-aux-pool-check PROPERTIES TIMEOUT 30)
+
 add_executable(moss-tts-info ${CMAKE_CURRENT_SOURCE_DIR}/moss_tts_info.cpp)
 target_link_libraries(moss-tts-info PRIVATE openmoss_core)
 

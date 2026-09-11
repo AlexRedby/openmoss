@@ -2,7 +2,13 @@ cmake_minimum_required(VERSION 3.18)
 project(openmoss VERSION 0.3.0 LANGUAGES CXX C)
 
 # Surfaced by --version and GET /info so a bug report names a build, not "latest".
-add_compile_definitions(OPENMOSS_VERSION="${PROJECT_VERSION}")
+# VNTTS modification: experimental auxiliary pool, never a default change.
+option(OPENMOSS_PERSISTENT_AUX_CPU_POOL "Reuse four auxiliary CPU workers" OFF)
+if(OPENMOSS_PERSISTENT_AUX_CPU_POOL)
+    add_compile_definitions(OPENMOSS_VERSION="${PROJECT_VERSION}-vntts-timing1-pool1")
+else()
+    add_compile_definitions(OPENMOSS_VERSION="${PROJECT_VERSION}-vntts-timing1")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,6 +60,10 @@ add_library(openmoss_core STATIC
 )
 target_include_directories(openmoss_core PUBLIC include)
 target_link_libraries(openmoss_core PUBLIC llama ggml ggml-base)
+if(OPENMOSS_PERSISTENT_AUX_CPU_POOL)
+    target_compile_definitions(openmoss_core PUBLIC OPENMOSS_PERSISTENT_AUX_CPU_POOL=1)
+    target_link_libraries(openmoss_core PUBLIC ggml-cpu)
+endif()
 
 # Platform-specific compile options
 if(MSVC)
