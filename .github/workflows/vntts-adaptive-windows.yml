@@ -48,9 +48,11 @@ jobs:
           cmake -S spirv-headers -B spirv-build -DCMAKE_INSTALL_PREFIX="$PWD/spirv-install"
           cmake --build spirv-build --target install --config Release
           cmake -S . -B native-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_OPENMP=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
+            -DGGML_VULKAN=ON -DGGML_OPENMP=OFF \
             -DOPENMOSS_PERSISTENT_AUX_CPU_POOL=OFF \
             -DCMAKE_PREFIX_PATH="$PWD/spirv-install"
+          grep -qx 'GGML_NATIVE:BOOL=OFF' native-build/CMakeCache.txt
           cmake --build native-build --target moss-tts-server moss-aux-pool-check moss-local-gpu-check --parallel 2
           export PATH="$PWD/native-build/bin:$PATH"
           ctest --test-dir native-build -R '^moss-(aux-pool|local-gpu)-check$' --output-on-failure
@@ -96,6 +98,8 @@ jobs:
             upstream = 'bfb1f465e0a86fb5a52bbf93e67ceba4b7d0b4e1'
             llama = '050ee92d04c2e1f639025786dea701c70e7d4204'
             variant = 'timing-adaptive'
+            ggml_native = $false
+            cpu_instruction_policy = 'portable-avx2'
             persistent_aux_cpu_pool = 'OFF'
             runtime_controls = @{
               local_gpu = $true
