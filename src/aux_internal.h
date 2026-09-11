@@ -7,6 +7,7 @@
 
 #include "openmoss/model.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -41,6 +42,7 @@ struct Model::Aux {
     int32_t n_vq             = 0;
     int32_t audio_vocab_full = 0;
     int32_t text_vocab_size  = 0;
+    size_t weight_bytes = 0;
 
     ggml_gallocr_t galloc = nullptr;
 

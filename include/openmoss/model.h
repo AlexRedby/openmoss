@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -145,6 +146,9 @@ struct SamplingConfig {
 // Sampling defaults for a family, as documented by the upstream cookbooks.
 SamplingConfig default_sampling(Arch arch);
 
+// True when a Vulkan device is registered; safe to call without a model.
+bool vulkan_available();
+
 struct LoadOptions {
     int32_t n_ctx        = 8192;
     int32_t n_batch      = 512;
@@ -168,6 +172,8 @@ struct LoadOptions {
     // op the codec needs (e.g. llama.cpp Metal lacks DIAG_MASK_INF). The
     // backbone still uses the GPU via libllama. Default: follow main_gpu.
     bool    aux_cpu      = false;
+    int32_t aux_cpu_threads = 4; // VNTTS: direct auxiliary CPU backend only.
+    bool    local_gpu = false;   // VNTTS: Local decoder only; requires aux_cpu.
 };
 
 // Forward decl; implemented in model.cpp.
@@ -221,11 +227,20 @@ public:
     int32_t n_audio_head_loaded()  const;
     bool    codec_present()        const;   // metadata says GGUF carries a codec
     bool    codec_loaded()         const;   // codec tensors are actually in aux memory
+    bool    local_gpu_separate_owner() const;
+    size_t  local_decoder_separate_weight_bytes() const;
+    const char * local_decoder_backend() const;
+    const char * auxiliary_backend() const;
+    int auxiliary_cpu_threads() const;
+    int32_t backbone_gpu_layers() const { return m_backbone_gpu_layers; }
+    const std::string & backbone_device() const { return m_backbone_device; }
 
     // Public so free helpers in model.cpp can populate it; consumers should
     // ignore this (use the typed accessors above).
     struct Aux;
     Aux * aux() const { return m_aux.get(); }
+    Aux * local_aux() const;
+    ggml_tensor * local_audio_embed(int i) const;
 
 private:
     Model();
@@ -234,6 +249,9 @@ private:
     llama_context * m_backbone_ctx   = nullptr;
 
     std::unique_ptr<Aux>                m_aux;
+    std::unique_ptr<Aux>                m_local_aux;
+    int32_t                             m_backbone_gpu_layers = 0;
+    std::string                         m_backbone_device;
     std::unique_ptr<class Tokenizer>    m_tokenizer;
     std::unique_ptr<class CodecGraphs>  m_codec;
     std::unique_ptr<class DiTGraph,   DiTGraphDeleter>   m_dit;

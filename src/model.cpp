@@ -24,6 +24,8 @@
 #include "openmoss/tokenizer.h"
 
 #include "aux_internal.h"
+#include "local_gpu_routing.h"
+#include "vntts_runtime_options.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -307,17 +309,26 @@ void upload_tensor_data(const LoadSpec & spec, Model::Aux & aux) {
     }
 }
 
-// Walk a metadata ctx and pick the moss-prefixed tensor names.
-//   include_codec=false skips the moss.codec.* tensors (saves ~3.4 GB VRAM
-//   when the caller only needs the LM-side path).
-void collect_moss_names(LoadSpec & spec, bool include_codec) {
+// Keep codec and prompt embeddings on CPU. The Local decoder gets its own GPU
+// owner plus duplicate audio embeddings for its tied output heads.
+void collect_moss_names(LoadSpec & spec, bool include_codec, bool exclude_local_gpu) {
     for (ggml_tensor * cur = ggml_get_first_tensor(spec.meta_ctx);
          cur; cur = ggml_get_next_tensor(spec.meta_ctx, cur))
     {
         std::string n = cur->name;
         if (n.rfind("moss.", 0) != 0) continue;
         if (!include_codec && n.rfind("moss.codec.", 0) == 0) continue;
+        if (exclude_local_gpu && local_gpu_weight_name(n)) continue;
         spec.wanted.emplace_back(n, n);
+    }
+}
+
+void collect_local_gpu_names(LoadSpec & spec, ggml_context * meta_ctx) {
+    for (ggml_tensor * cur = ggml_get_first_tensor(meta_ctx);
+         cur; cur = ggml_get_next_tensor(meta_ctx, cur))
+    {
+        const std::string n = cur->name;
+        if (local_gpu_tensor_name(n)) spec.wanted.emplace_back(n, n);
     }
 }
 
@@ -405,8 +416,57 @@ bool Model::codec_loaded() const {
     return m_aux->tensors.count("moss.codec.quantizer.q.0.codebook.weight") > 0;
 }
 
+bool vulkan_available() {
+    ggml_backend_load_all();
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (reg && std::strcmp(ggml_backend_reg_name(reg), "Vulkan") == 0) return true;
+    }
+    return false;
+}
+
+bool Model::local_gpu_separate_owner() const {
+    return m_local_aux != nullptr;
+}
+
+size_t Model::local_decoder_separate_weight_bytes() const {
+    return m_local_aux ? m_local_aux->weight_bytes : 0;
+}
+
+const char * Model::local_decoder_backend() const {
+    const Aux * aux = m_local_aux ? m_local_aux.get() : m_aux.get();
+    return aux && aux->backend ? ggml_backend_name(aux->backend) : "unavailable";
+}
+
+const char * Model::auxiliary_backend() const {
+    return m_aux && m_aux->backend ? ggml_backend_name(m_aux->backend) : "unavailable";
+}
+
+int Model::auxiliary_cpu_threads() const {
+    return m_aux ? m_aux->cpu_threads : 0;
+}
+
+Model::Aux * Model::local_aux() const {
+    return m_local_aux ? m_local_aux.get() : m_aux.get();
+}
+
+ggml_tensor * Model::local_audio_embed(int i) const {
+    Aux * aux = local_aux();
+    if (!aux || i < 0 || i >= aux->n_vq) return nullptr;
+    const auto it = aux->tensors.find("moss.audio_embed." + std::to_string(i) + ".weight");
+    return it == aux->tensors.end() ? nullptr : it->second;
+}
+
 std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOptions & opts) {
     auto self = std::unique_ptr<Model>(new Model());
+    if (!vntts_valid_aux_cpu_threads(opts.aux_cpu_threads)) {
+        throw std::runtime_error("Model::load: aux CPU threads must be an integer from 1 to 16");
+    }
+    if (opts.local_gpu && opts.n_gpu_layers == 0) {
+        throw std::runtime_error(
+            "Model::load: local GPU requires GPU backbone; --n-gpu-layers 0 unsupported");
+    }
 
     // ── 0. Pick which GPU we want to live on (used for both libllama and the
     //       aux backend). On a multi-GPU box, leaving libllama in its default
@@ -428,6 +488,10 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     } else {
         std::fprintf(stderr, "Model::load: no GPU device found; using CPU backend\n");
     }
+    if (opts.local_gpu && !picked_dev) {
+        std::fprintf(stderr, "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"vulkan_device\"}\n");
+        throw std::runtime_error("Model::load: local GPU requires an available GPU device");
+    }
 
     // ── 1. libllama loads the Qwen3 backbone ────────────────────────────────
     llama_model_params mp = llama_model_default_params();
@@ -441,6 +505,22 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     self->m_backbone_model = llama_model_load_from_file(gguf_path.c_str(), mp);
     if (!self->m_backbone_model) {
         throw std::runtime_error("Model::load: libllama failed to load backbone from " + gguf_path);
+    }
+    const int32_t n_backbone_layers = llama_model_n_layer(self->m_backbone_model) + 1;
+    if (picked_dev && llama_supports_gpu_offload()) {
+        const int32_t requested_layers = opts.n_gpu_layers < 0
+            ? n_backbone_layers : opts.n_gpu_layers;
+        self->m_backbone_gpu_layers = std::clamp(requested_layers, 0, n_backbone_layers);
+        if (self->m_backbone_gpu_layers > 0) {
+            // Prefer the user-facing hardware description; retain the backend
+            // label only if a backend omits it. Bound public JSON either way.
+            const char * device = ggml_backend_dev_description(picked_dev);
+            if (!device) device = ggml_backend_dev_name(picked_dev);
+            if (device) {
+                self->m_backbone_device.assign(
+                    device, std::min<size_t>(std::strlen(device), 128));
+            }
+        }
     }
 
     llama_context_params cp = llama_context_default_params();
@@ -484,11 +564,16 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     }
 
     LoadSpec sc_spec; sc_spec.path = sidecar_path;
+    // Local spec borrows sidecar metadata; sc_spec remains the sole owner and
+    // releases both contexts once CPU and Local uploads have completed.
+    LoadSpec local_spec; local_spec.path = sidecar_path;
     LoadSpec bb_spec; bb_spec.path = gguf_path;
     gguf_init_params gip{}; gip.no_alloc = true;
 
     gip.ctx = &sc_spec.meta_ctx;
     sc_spec.gctx = gguf_init_from_file(sidecar_path.c_str(), gip);
+    local_spec.gctx = sc_spec.gctx;
+    local_spec.meta_ctx = sc_spec.meta_ctx;
 
     gip.ctx = &bb_spec.meta_ctx;
     bb_spec.gctx = gguf_init_from_file(gguf_path.c_str(), gip);
@@ -498,14 +583,40 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
         throw std::runtime_error("Model::load: gguf_init_from_file failed for backbone " + gguf_path);
     }
 
+    const bool local_gpu = opts.local_gpu;
+    std::string local_gpu_problem;
+    const char * local_gpu_failure_category = nullptr;
     if (!sc_spec.gctx) {
+        if (local_gpu) {
+            local_gpu_problem =
+                "Model::load: local GPU requires a Local sidecar GGUF";
+            local_gpu_failure_category = "local_gpu";
+        }
         std::fprintf(stderr,
             "Model::load: warning — sidecar %s not found; audio heads/embeds and codec are unavailable\n",
             sidecar_path.c_str());
     } else {
         read_moss_kv(sc_spec.gctx, self->m_dims, self->m_aux->codec_present);
+        if (local_gpu && !opts.aux_cpu) {
+            local_gpu_problem =
+                "Model::load: local GPU requires --aux-cpu to keep codec on CPU";
+            local_gpu_failure_category = "local_gpu";
+        } else if (local_gpu && self->m_dims.arch != Arch::TTSLocal) {
+            local_gpu_problem =
+                "Model::load: local GPU supports moss_tts_local only, not "
+                + std::string(arch_name(self->m_dims.arch));
+            local_gpu_failure_category = "local_gpu";
+        }
         const bool include_codec = self->m_aux->codec_present && !opts.skip_codec;
-        collect_moss_names(sc_spec, include_codec);
+        collect_moss_names(sc_spec, include_codec, local_gpu);
+        if (local_gpu && local_gpu_problem.empty()) {
+            collect_local_gpu_names(local_spec, sc_spec.meta_ctx);
+            if (local_spec.wanted.empty()) {
+                local_gpu_problem =
+                    "Model::load: local GPU found no Local decoder tensors";
+                local_gpu_failure_category = "local_gpu";
+            }
+        }
         if (self->m_aux->codec_present && opts.skip_codec) {
             std::fprintf(stderr, "Model::load: codec tensors skipped (LoadOptions::skip_codec=true)\n");
         }
@@ -545,9 +656,16 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     }
 
     try {
+        if (!local_gpu_problem.empty()) {
+            std::fprintf(stderr,
+                         "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"%s\"}\n",
+                         local_gpu_failure_category ? local_gpu_failure_category : "local_gpu");
+            throw std::runtime_error(local_gpu_problem);
+        }
         size_t total_bytes = 0;
         if (sc_spec.gctx) stage_tensor_descriptors(sc_spec, *self->m_aux, total_bytes);
         stage_tensor_descriptors(bb_spec, *self->m_aux, total_bytes);
+        self->m_aux->weight_bytes = total_bytes;
 
         self->m_aux->buffer = ggml_backend_alloc_ctx_tensors(self->m_aux->ctx, self->m_aux->backend);
         if (!self->m_aux->buffer) {
@@ -557,6 +675,41 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
 
         if (sc_spec.gctx) upload_tensor_data(sc_spec, *self->m_aux);
         upload_tensor_data(bb_spec, *self->m_aux);
+
+        if (!local_spec.wanted.empty()) {
+            self->m_local_aux = std::make_unique<Aux>();
+            self->m_local_aux->backend = ggml_backend_dev_init(picked_dev, nullptr);
+            if (!self->m_local_aux->backend) {
+                std::fprintf(stderr,
+                             "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"local_gpu\"}\n");
+                throw std::runtime_error("Model::load: failed to initialise Local GPU backend");
+            }
+            ggml_init_params local_ip{};
+            local_ip.mem_size = ggml_tensor_overhead() * (local_spec.wanted.size() + 16);
+            local_ip.no_alloc = true;
+            self->m_local_aux->ctx = ggml_init(local_ip);
+            if (!self->m_local_aux->ctx) {
+                std::fprintf(stderr,
+                             "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"local_gpu\"}\n");
+                throw std::runtime_error("Model::load: ggml_init for Local GPU ctx failed");
+            }
+            size_t local_bytes = 0;
+            stage_tensor_descriptors(local_spec, *self->m_local_aux, local_bytes);
+            self->m_local_aux->weight_bytes = local_bytes;
+            self->m_local_aux->buffer = ggml_backend_alloc_ctx_tensors(
+                self->m_local_aux->ctx, self->m_local_aux->backend);
+            if (!self->m_local_aux->buffer) {
+                std::fprintf(stderr,
+                             "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"local_gpu\"}\n");
+                throw std::runtime_error(
+                    "Model::load: failed to allocate Local GPU weights ("
+                    + std::to_string(local_bytes / (1024 * 1024)) + " MiB)");
+            }
+            upload_tensor_data(local_spec, *self->m_local_aux);
+            std::fprintf(stderr, "Model::load: local decoder backend = %s (%zu MiB weights)\n",
+                         ggml_backend_name(self->m_local_aux->backend),
+                         local_bytes / (1024 * 1024));
+        }
     } catch (...) {
         if (sc_spec.gctx) gguf_free(sc_spec.gctx);
         if (sc_spec.meta_ctx) ggml_free(sc_spec.meta_ctx);
@@ -599,6 +752,11 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     }
     self->m_aux->galloc =
         ggml_gallocr_new(ggml_backend_get_default_buffer_type(self->m_aux->backend));
+    if (self->m_local_aux) {
+        self->m_local_aux->hidden_size = self->m_dims.hidden_size;
+        self->m_local_aux->n_vq = self->m_dims.n_vq;
+        self->m_local_aux->audio_vocab_full = self->m_dims.audio_vocab_size + 1;
+    }
 
     std::fprintf(stderr,
         "Model::load: arch=%s, %d audio embeds, %d audio heads, codec=%s (v%d, %d ch @ %d Hz), "
@@ -623,7 +781,7 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
                 "Model::load: arch is moss_tts_local but the sidecar carries no "
                 "local-transformer geometry (moss.local.n_layer); reconvert the model");
         }
-        if (!self->m_aux->tensors.count("moss.local_text_head.weight")) {
+        if (!self->local_aux()->tensors.count("moss.local_text_head.weight")) {
             throw std::runtime_error(
                 "Model::load: arch is moss_tts_local but moss.local_text_head.weight "
                 "is missing from the sidecar; reconvert the model");

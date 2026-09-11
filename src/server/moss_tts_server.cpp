@@ -183,6 +183,9 @@ namespace {
         "  --no-flash-attn\n"
         "  --skip-codec           (no waveform synthesis; codes only — debug)\n"
         "  --aux-cpu              force audio embeds + codec onto CPU\n"
+        "  --aux-cpu-threads N    auxiliary CPU worker threads (1..16; default: 4)\n"
+        "  --local-gpu            run only the Local decoder on Vulkan; requires --aux-cpu\n"
+        "  --capabilities-json    print VNTTS runtime capabilities as JSON and exit\n"
         "                          (workaround for Metal DIAG_MASK_INF)\n"
         "  --voice-dir DIR        enable the voice registry: persistent named\n"
         "                          references at DIR/{id}.wav + DIR/{id}.json,\n"
@@ -580,6 +583,8 @@ int main(int argc, char ** argv) {
     bool flash_attn   = true;
     bool skip_codec   = false;
     bool aux_cpu      = false;
+    int aux_cpu_threads = 4;
+    bool local_gpu = false;
     DelayTemplate tpl = DelayTemplate::Auto;
     std::string voice_dir;
     std::string webui_dir_arg;
@@ -601,6 +606,19 @@ int main(int argc, char ** argv) {
         else if (k == "--no-flash-attn")  flash_attn   = false;
         else if (k == "--skip-codec")     skip_codec   = true;
         else if (k == "--aux-cpu")        aux_cpu      = true;
+        else if (k == "--aux-cpu-threads") {
+            try { aux_cpu_threads = std::stoi(next()); }
+            catch (const std::exception &) {
+                std::fprintf(stderr, "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"invalid-aux-cpu-threads\"}\n");
+                return 2;
+            }
+        }
+        else if (k == "--local-gpu") local_gpu = true;
+        else if (k == "--capabilities-json") {
+            std::printf("{\"schema\":\"vntts.openmoss.capabilities\",\"version\":1,\"vulkan_optional\":true,\"vulkan_available\":%s,\"local_gpu\":true,\"aux_cpu_threads\":true,\"aux_cpu_threads_default\":4,\"aux_cpu_threads_min\":1,\"aux_cpu_threads_max\":16}\n",
+                        openmoss::vulkan_available() ? "true" : "false");
+            return 0;
+        }
         else if (k == "--template") {
             const std::string v = next();
             if      (v == "auto")     tpl = DelayTemplate::Auto;
@@ -620,6 +638,22 @@ int main(int argc, char ** argv) {
         else if (k == "--help" || k == "-h") usage(0);
         else { std::fprintf(stderr, "unknown arg: %s\n", k.c_str()); usage(2); }
     }
+    if (aux_cpu_threads < 1 || aux_cpu_threads > 16) {
+        std::fprintf(stderr, "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"invalid-aux-cpu-threads\"}\n");
+        return 2;
+    }
+    if (aux_cpu_threads != 4 && !aux_cpu) {
+        std::fprintf(stderr, "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"aux-cpu-threads-requires-aux-cpu\"}\n");
+        return 2;
+    }
+    if (local_gpu && !aux_cpu) {
+        std::fprintf(stderr, "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"local-gpu-requires-aux-cpu\"}\n");
+        return 2;
+    }
+    if (local_gpu && n_gpu_layers == 0) {
+        std::fprintf(stderr, "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"local_gpu\"}\n");
+        return 2;
+    }
     if (model_path.empty()) usage(2);
 
     openmoss::LoadOptions lo;
@@ -630,10 +664,13 @@ int main(int argc, char ** argv) {
     lo.flash_attn   = flash_attn;
     lo.skip_codec   = skip_codec;
     lo.aux_cpu      = aux_cpu;
+    lo.aux_cpu_threads = aux_cpu_threads;
+    lo.local_gpu = local_gpu;
     auto model = openmoss::Model::load(model_path, lo);
     std::fprintf(stderr,
-                  "[server] model loaded; codec=%s\n",
-                  model->codec_loaded() ? "on" : "off");
+                  "[server] model loaded; codec=%s, local_decoder=%s (separate weights=%zu bytes)\n",
+                  model->codec_loaded() ? "on" : "off",
+                  model->local_decoder_backend(), model->local_decoder_separate_weight_bytes());
 
     // Resolve which delay checkpoint this server is treating the model as.
     // Explicit --template wins; Auto keeps the historical n_vq guess.
@@ -939,6 +976,17 @@ int main(int argc, char ** argv) {
             {"frame_rate_hz",     double(d.sampling_rate) / double(d.downsample_rate)},
             {"codec_present",     model->codec_present()},
             {"codec_loaded",      model->codec_loaded()},
+            {"local_decoder_separate_gpu", model->local_gpu_separate_owner()},
+            {"local_decoder_backend", model->local_decoder_backend()},
+            {"local_decoder_separate_weight_bytes", model->local_decoder_separate_weight_bytes()},
+            {"placement", {
+                {"backbone", model->backbone_gpu_layers() > 0 ? "gpu" : "cpu"},
+                {"device", model->backbone_device()},
+                {"local", model->local_decoder_backend()},
+                {"auxiliary", model->auxiliary_backend()},
+                {"gpu_layers", model->backbone_gpu_layers()},
+                {"aux_cpu_threads", model->auxiliary_cpu_threads()},
+            }},
             {"requests_served",   uint64_t(n_requests.load())},
         };
         // Which checkpoint the delay family is being served as — the GGUF alone

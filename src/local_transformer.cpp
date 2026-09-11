@@ -104,7 +104,7 @@ public:
                 "); no projection exists between them");
         }
 
-        auto * aux = owner.aux();
+        auto * aux = owner.local_aux();
         if (!aux || !aux->backend) {
             throw std::runtime_error("LocalTransformer: aux backend not initialised");
         }
@@ -178,7 +178,7 @@ public:
     void step(const float * x, int pos, Cache & cache,
               const std::vector<Head> & heads,
               std::vector<std::vector<float>> & logits_out) {
-        auto * aux = m_owner.aux();
+        auto * aux = m_owner.local_aux();
         const int T_prev = cache.n_pos;
         const int T      = T_prev + 1;
         if (pos != T_prev) {
@@ -300,6 +300,22 @@ public:
             ggml_build_forward_expand(graph, v_new[size_t(li)]);
         }
 
+        if (m_owner.local_gpu_separate_owner()) {
+            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+                const ggml_tensor * node = ggml_graph_node(graph, i);
+                if (!ggml_backend_supports_op(aux->backend, node)) {
+                    const char * backend = ggml_backend_name(aux->backend);
+                    const char * op = ggml_op_name(node->op);
+                    ggml_free(ctx);
+                    throw std::runtime_error(
+                        "LocalTransformer::step: backend "
+                        + std::string(backend ? backend : "unavailable")
+                        + " does not support op "
+                        + std::string(op ? op : "unknown"));
+                }
+            }
+        }
+
         if (!ggml_gallocr_alloc_graph(m_galloc, graph)) {
             ggml_free(ctx);
             throw std::runtime_error("LocalTransformer::step: gallocr_alloc_graph failed");
@@ -398,11 +414,11 @@ public:
                     + ", expected " + std::to_string(m_row_width));
             }
         }
-        m_text_head = model.aux()->tensors.at("moss.local_text_head.weight");
+        m_text_head = model.local_aux()->tensors.at("moss.local_text_head.weight");
         m_cb_history.resize(size_t(m_dims.n_vq));
 
         for (int k = 0; k < m_dims.n_vq; ++k) {
-            ggml_tensor * e = model.audio_embed(k);
+            ggml_tensor * e = model.local_audio_embed(k);
             if (!e) throw std::runtime_error("LocalFrameDecoder: missing audio embedding "
                                              + std::to_string(k));
             if (e->type != GGML_TYPE_F16) {

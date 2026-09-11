@@ -1567,6 +1567,7 @@ Model::~Model() {
         llama_model_free(m_backbone_model);
         m_backbone_model = nullptr;
     }
+    m_local_aux.reset();
     m_aux.reset();
 }
 
