@@ -355,6 +355,9 @@ Additional flags:
 
 | flag                | meaning                                                              |
 |---------------------|----------------------------------------------------------------------|
+| `--aux-cpu-threads N` | use 1..16 workers for the auxiliary CPU backend (default 4; requires `--aux-cpu` when non-default) |
+| `--local-gpu`       | run the Local frame decoder on Vulkan while keeping the codec on CPU; requires `--aux-cpu` and GPU backbone layers |
+| `--capabilities-json` | print the versioned runtime capability contract and exit without loading a model |
 | `--webui-dir DIR`   | serve a static WebUI from `DIR` at `/` (overrides auto-detection)    |
 | `--no-webui`        | disable WebUI even if a `webui/` directory is found                  |
 
@@ -365,7 +368,8 @@ The CMake build stages the source tree's `webui/` next to the server binary, so 
 ### Endpoints
 
 - `GET /health` — readiness probe, returns `ok`.
-- `GET /info` — JSON with model dims, codec status, and the request counter. For
+- `GET /info` — JSON with model dims, codec status, selected backbone/Local/auxiliary
+  placement, worker count, and the request counter. For
   MOSS-SoundEffect it also reports `max_seconds` and the solver defaults.
 - `GET /v1/models` — OpenAI-compatible model list. Always exactly one entry, named after
   the loaded architecture; the model cannot be switched at runtime.
