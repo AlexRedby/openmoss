@@ -723,12 +723,17 @@ std::unique_ptr<Model> Model::load(const std::string & gguf_path, const LoadOpti
     gguf_free(bb_spec.gctx);
     ggml_free(bb_spec.meta_ctx);
 
-    // VNTTS modification: opt-in CPU-only experiment, after raw GGUF contexts
-    // released, so the GGML pool constructor cannot extend their cleanup path.
-    if (self->m_aux->init_cpu_pool()) {
+    // VNTTS modification: configure the direct auxiliary CPU backend after raw
+    // GGUF contexts are released, so optional pool construction stays separate.
+    if (self->m_aux->init_cpu_pool(opts.aux_cpu_threads)) {
+#if defined(OPENMOSS_PERSISTENT_AUX_CPU_POOL) && OPENMOSS_PERSISTENT_AUX_CPU_POOL
+        constexpr const char * pool_mode = "persistent pool, idle poll=0";
+#else
+        constexpr const char * pool_mode = "disposable pool";
+#endif
         std::fprintf(stderr,
-                     "Model::load: persistent aux CPU pool = %d threads (idle poll=0)\n",
-                     GGML_DEFAULT_N_THREADS);
+                     "Model::load: aux CPU backend = %d threads (%s)\n",
+                     self->m_aux->cpu_threads, pool_mode);
     }
 
     // Cache convenient dim shortcuts on Aux.

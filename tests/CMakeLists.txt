@@ -6,7 +6,9 @@ add_executable(moss-aux-pool-check moss_aux_pool_check.cpp)
 target_include_directories(moss-aux-pool-check PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(moss-aux-pool-check PRIVATE openmoss_core ggml-cpu)
 add_test(NAME moss-aux-pool-check COMMAND moss-aux-pool-check)
-set_tests_properties(moss-aux-pool-check PROPERTIES TIMEOUT 30)
+# Disposable worker creation can dominate these repeated tiny graphs on CI.
+# Keep every exact-output and ownership cycle; this is not a latency gate.
+set_tests_properties(moss-aux-pool-check PROPERTIES TIMEOUT 120)
 
 # VNTTS modification: verifies the diagnostic build selection without a model.
 add_executable(moss-local-gpu-check moss_local_gpu_check.cpp)

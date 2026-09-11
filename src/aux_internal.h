@@ -6,6 +6,7 @@
 #pragma once
 
 #include "openmoss/model.h"
+#include "vntts_runtime_options.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -51,14 +52,15 @@ struct Model::Aux {
     // use it. ggml_backend_free() does not own an attached threadpool.
     ggml_threadpool_t cpu_pool = nullptr;
 
-    // Returns true only when the opt-in build attached the fixed four-thread
-    // pool. A false return leaves the backend on GGML's disposable-pool path.
-    bool init_cpu_pool() {
+    // Configure the direct auxiliary CPU backend, and attach its optional pool.
+    // A false return means the backend cannot be configured.
+    int cpu_threads = 0;
+
+    bool init_cpu_pool(int n_threads) {
 #if defined(OPENMOSS_PERSISTENT_AUX_CPU_POOL) && OPENMOSS_PERSISTENT_AUX_CPU_POOL
         if (!backend || !ggml_backend_is_cpu(backend)) return false;
-        if (cpu_pool) return true;
-
-        constexpr int n_threads = GGML_DEFAULT_N_THREADS;
+        if (!vntts_valid_aux_cpu_threads(n_threads)) return false;
+        if (cpu_pool) return cpu_threads == n_threads;
         struct ggml_threadpool_params params = ggml_threadpool_params_default(n_threads);
         params.poll = 0; // persistent idle workers sleep instead of busy-polling
         ggml_threadpool_t pool = ggml_threadpool_new(&params);
@@ -67,12 +69,14 @@ struct Model::Aux {
         ggml_backend_cpu_set_n_threads(backend, n_threads);
         ggml_backend_cpu_set_threadpool(backend, pool);
         cpu_pool = pool;
-        return true;
 #else
-        return false;
+        if (!backend || !ggml_backend_is_cpu(backend)) return false;
+        if (!vntts_valid_aux_cpu_threads(n_threads)) return false;
+        ggml_backend_cpu_set_n_threads(backend, n_threads);
 #endif
+        cpu_threads = n_threads;
+        return true;
     }
-
     ~Aux() {
         if (galloc)  ggml_gallocr_free(galloc);
         if (buffer)  ggml_backend_buffer_free(buffer);

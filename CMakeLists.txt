@@ -59,10 +59,9 @@ add_library(openmoss_core STATIC
     src/wav.cpp
 )
 target_include_directories(openmoss_core PUBLIC include)
-target_link_libraries(openmoss_core PUBLIC llama ggml ggml-base)
+target_link_libraries(openmoss_core PUBLIC llama ggml ggml-base ggml-cpu)
 if(OPENMOSS_PERSISTENT_AUX_CPU_POOL)
     target_compile_definitions(openmoss_core PUBLIC OPENMOSS_PERSISTENT_AUX_CPU_POOL=1)
-    target_link_libraries(openmoss_core PUBLIC ggml-cpu)
 endif()
 
 # Platform-specific compile options
