@@ -51,6 +51,11 @@ jobs:
           test "$(jq -r .head_branch <<<"$run_json")" = main
           source="$(jq -r .head_sha <<<"$run_json")"
           [[ "$source" =~ ^[0-9a-f]{40}$ ]]
+
+          compare_json="$(gh api "repos/$GITHUB_REPOSITORY/compare/$source...$GITHUB_SHA")"
+          [[ "$(jq -r .status <<<"$compare_json")" =~ ^(ahead|identical)$ ]]
+          test "$(jq '.files | length' <<<"$compare_json")" -lt 300
+          test "$(jq '[.files[]?.filename | select(startswith(".github/") | not)] | length' <<<"$compare_json")" -eq 0
           echo "sha=$source" >> "$GITHUB_OUTPUT"
 
       - name: Download the qualified Actions artifact
@@ -96,5 +101,5 @@ jobs:
           fi
           rm candidate/VNTTS-BUILD.json
           gh release create "$RELEASE_TAG" "$archive" "$sidecar" \
-            --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" --generate-notes --latest=false
