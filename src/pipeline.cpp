@@ -564,6 +564,8 @@ GenerateResult generate(Model & model,
             }
             ref_codes = req.reference_codes[0].codes;
             T_ref     = req.reference_codes[0].n_frames;
+            std::fprintf(stderr,
+                         "[generate] reference: %d frames (cached codes)\n", T_ref);
         } else {
             throw std::runtime_error(
                 "generate: reference_codes is not supported for this architecture");
