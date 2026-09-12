@@ -17,6 +17,13 @@ target_link_libraries(moss-local-gpu-check PRIVATE openmoss_core)
 add_test(NAME moss-local-gpu-check COMMAND moss-local-gpu-check)
 set_tests_properties(moss-local-gpu-check PROPERTIES TIMEOUT 30)
 
+add_executable(moss-voice-code-cache-check moss_voice_code_cache_check.cpp)
+target_include_directories(moss-voice-code-cache-check PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/third_party
+)
+add_test(NAME moss-voice-code-cache-check COMMAND moss-voice-code-cache-check)
+
 add_executable(moss-tts-info ${CMAKE_CURRENT_SOURCE_DIR}/moss_tts_info.cpp)
 target_link_libraries(moss-tts-info PRIVATE openmoss_core)
 

@@ -158,6 +158,7 @@
 #include "openmoss/pipeline.h"
 #include "openmoss/soundeffect.h"
 #include "openmoss/wav.h"
+#include "voice_code_cache.h"
 
 using json = nlohmann::json;
 
@@ -192,6 +193,8 @@ namespace {
         "                          managed via /v1/voices and used by passing\n"
         "                          voice/voices on a speech request. Reference\n"
         "                          codes are encoded once and cached in memory.\n"
+        "  --voice-cache-key KEY  persist encoded reference codes under --voice-dir;\n"
+        "                          KEY must identify the exact model + codec files.\n"
         "  --webui-dir DIR        serve a static WebUI from DIR at /\n"
         "                          (default: auto-detect ./webui or <binary>/webui)\n"
         "  --no-webui             disable WebUI auto-detection\n"
@@ -334,6 +337,7 @@ struct VoiceStore {
     bool enabled() const { return !dir.empty(); }
     std::string wav_path(const std::string & id)  const { return dir + "/" + id + ".wav"; }
     std::string meta_path(const std::string & id) const { return dir + "/" + id + ".json"; }
+    std::string codes_path(const std::string & id) const { return dir + "/" + id + ".codes.json"; }
 
     bool exists(const std::string & id) const {
         std::error_code ec;
@@ -392,6 +396,7 @@ struct VoiceStore {
         std::error_code ec;
         bool wav_ok = std::filesystem::remove(wav_path(id), ec);
         std::filesystem::remove(meta_path(id), ec);
+        std::filesystem::remove(codes_path(id), ec);
         return wav_ok;
     }
 };
@@ -587,6 +592,7 @@ int main(int argc, char ** argv) {
     bool local_gpu = false;
     DelayTemplate tpl = DelayTemplate::Auto;
     std::string voice_dir;
+    std::string voice_cache_key;
     std::string webui_dir_arg;
     bool no_webui     = false;
 
@@ -615,7 +621,7 @@ int main(int argc, char ** argv) {
         }
         else if (k == "--local-gpu") local_gpu = true;
         else if (k == "--capabilities-json") {
-            std::printf("{\"schema\":\"vntts.openmoss.capabilities\",\"version\":1,\"vulkan_optional\":true,\"vulkan_available\":%s,\"local_gpu\":true,\"aux_cpu_threads\":true,\"aux_cpu_threads_default\":4,\"aux_cpu_threads_min\":1,\"aux_cpu_threads_max\":16}\n",
+            std::printf("{\"schema\":\"vntts.openmoss.capabilities\",\"version\":1,\"vulkan_optional\":true,\"vulkan_available\":%s,\"local_gpu\":true,\"aux_cpu_threads\":true,\"aux_cpu_threads_default\":4,\"aux_cpu_threads_min\":1,\"aux_cpu_threads_max\":16,\"persistent_voice_codes\":true}\n",
                         openmoss::vulkan_available() ? "true" : "false");
             return 0;
         }
@@ -631,6 +637,7 @@ int main(int argc, char ** argv) {
             }
         }
         else if (k == "--voice-dir")      voice_dir     = next();
+        else if (k == "--voice-cache-key") voice_cache_key = next();
         else if (k == "--webui-dir")      webui_dir_arg = next();
         else if (k == "--no-webui")       no_webui     = true;
         // VNTTS modification: verify the diagnostic build without loading weights.
@@ -652,6 +659,10 @@ int main(int argc, char ** argv) {
     }
     if (local_gpu && n_gpu_layers == 0) {
         std::fprintf(stderr, "VNTTS_STARTUP_FAILURE_JSON={\"category\":\"local_gpu\"}\n");
+        return 2;
+    }
+    if (!voice_cache_key.empty() && (voice_dir.empty() || !valid_voice_id(voice_cache_key))) {
+        std::fprintf(stderr, "--voice-cache-key requires --voice-dir and a safe 1..64 character key\n");
         return 2;
     }
     if (model_path.empty()) usage(2);
@@ -865,6 +876,25 @@ int main(int argc, char ** argv) {
                 err = "voice '" + id + "': cannot read its WAV from the registry";
                 return false;
             }
+            const std::string wav_checksum =
+                openmoss::server::voice_wav_checksum(wav_bytes);
+            if (!voice_cache_key.empty()) {
+                openmoss::EncodedReference cached;
+                if (openmoss::server::load_voice_codes(
+                        store.codes_path(id), voice_cache_key, wav_checksum,
+                        model->dims().n_vq, model->dims().audio_vocab_size,
+                        cached)) {
+                    {
+                        std::lock_guard<std::mutex> rg(reg_mu);
+                        codes_cache[id] = cached;
+                    }
+                    std::fprintf(stderr,
+                        "[server] voice '%s' restored: %d frames (persistent codes)\n",
+                        id.c_str(), cached.n_frames);
+                    req.reference_codes.push_back(std::move(cached));
+                    continue;
+                }
+            }
             std::vector<float> wav;
             try {
                 wav = openmoss::decode_wav(wav_bytes.data(), wav_bytes.size(),
@@ -892,6 +922,14 @@ int main(int argc, char ** argv) {
             {
                 std::lock_guard<std::mutex> rg(reg_mu);
                 codes_cache[id] = enc;
+                if (!voice_cache_key.empty() && store.exists(id) &&
+                    !openmoss::server::save_voice_codes(
+                        store.codes_path(id), voice_cache_key, wav_checksum,
+                        model->dims().n_vq, model->dims().audio_vocab_size, enc)) {
+                    std::fprintf(stderr,
+                        "[server] voice '%s': persistent code cache write failed\n",
+                        id.c_str());
+                }
             }
             req.reference_codes.push_back(std::move(enc));
         }
@@ -998,6 +1036,7 @@ int main(int argc, char ** argv) {
         }
         info["voice_registry"] = store.enabled();
         if (store.enabled()) info["n_voices"] = store.list().size();
+        info["persistent_voice_codes"] = !voice_cache_key.empty();
         // MOSS-SoundEffect has no codec and no codebooks; what a caller needs to
         // know is the solver surface and the fixed duration ceiling.
         if (d.arch == openmoss::Arch::SoundEffect) {

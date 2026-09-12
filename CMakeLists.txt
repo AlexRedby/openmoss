@@ -7,7 +7,7 @@ option(OPENMOSS_PERSISTENT_AUX_CPU_POOL "Reuse four auxiliary CPU workers" OFF)
 if(OPENMOSS_PERSISTENT_AUX_CPU_POOL)
     add_compile_definitions(OPENMOSS_VERSION="${PROJECT_VERSION}-vntts-timing1-pool1")
 else()
-    add_compile_definitions(OPENMOSS_VERSION="${PROJECT_VERSION}-vntts-timing1")
+    add_compile_definitions(OPENMOSS_VERSION="${PROJECT_VERSION}-vntts-timing2")
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
