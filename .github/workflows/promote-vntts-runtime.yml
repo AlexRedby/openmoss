@@ -1,0 +1,107 @@
+name: Promote qualified VNTTS runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Qualified adaptive workflow run ID"
+        required: true
+        type: string
+      release_tag:
+        description: "New release tag, for example v0.3.0-vntts-timing-2"
+        required: true
+        type: string
+      runtime_sha256:
+        description: "Qualified inner runtime ZIP SHA-256"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ARTIFACT_NAME: moss-native-timing-adaptive-windows-x64
+      ARCHIVE_NAME: moss-native-timing-adaptive-windows-x64.zip
+    steps:
+      - name: Validate promotion inputs
+        shell: bash
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RUNTIME_SHA256: ${{ inputs.runtime_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-vntts-timing-[1-9][0-9]*$ ]]
+          [[ "$RUNTIME_SHA256" =~ ^[0-9A-Fa-f]{64}$ ]]
+
+      - name: Validate the source workflow run
+        id: source
+        shell: bash
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          workflow_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/vntts-adaptive-windows.yml" --jq .id)"
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
+          test "$(jq -r .workflow_id <<<"$run_json")" = "$workflow_id"
+          test "$(jq -r .status <<<"$run_json")" = completed
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .event <<<"$run_json")" = push
+          test "$(jq -r .head_branch <<<"$run_json")" = main
+          source="$(jq -r .head_sha <<<"$run_json")"
+          [[ "$source" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$source" >> "$GITHUB_OUTPUT"
+
+      - name: Download the qualified Actions artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: candidate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.build_run_id }}
+
+      - name: Verify and publish the exact qualified runtime
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RUNTIME_SHA256: ${{ inputs.runtime_sha256 }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          archive="candidate/$ARCHIVE_NAME"
+          sidecar="$archive.sha256"
+          test -f "$archive"
+          test -f "$sidecar"
+          test "$(find candidate -maxdepth 1 -type f | wc -l)" -eq 2
+
+          expected="${RUNTIME_SHA256,,}"
+          test "$(tr -d '[:space:]' < "$sidecar" | tr '[:upper:]' '[:lower:]')" = "$expected"
+          test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$expected"
+
+          unzip -p "$archive" VNTTS-BUILD.json > candidate/VNTTS-BUILD.json
+          test "$(jq -r .source candidate/VNTTS-BUILD.json)" = "$SOURCE_SHA"
+          test "$(jq -r .source_repository candidate/VNTTS-BUILD.json)" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .variant candidate/VNTTS-BUILD.json)" = timing-adaptive
+          test "$(jq -r .ggml_native candidate/VNTTS-BUILD.json)" = false
+          test "$(jq -r .runtime_controls.persistent_voice_codes candidate/VNTTS-BUILD.json)" = true
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          rm candidate/VNTTS-BUILD.json
+          gh release create "$RELEASE_TAG" "$archive" "$sidecar" \
+            --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
+            --title "$RELEASE_TAG" --generate-notes --latest=false

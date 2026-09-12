@@ -1,8 +1,6 @@
-name: Build & Release
+name: Build generic backend archives (manual)
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -206,11 +204,7 @@ jobs:
         id: tag
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
-          fi
+          echo "value=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Upload to release
         env:
